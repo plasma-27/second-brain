@@ -123,6 +123,9 @@ if "chat_history" not in st.session_state:
 if "pending_interrupt" not in st.session_state:
     st.session_state.pending_interrupt = None
 
+if "pending_prompt" not in st.session_state:
+    st.session_state.pending_prompt = None
+
 if "cfg" not in st.session_state:
     st.session_state.cfg = {
         "api_key": os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", ""),
@@ -331,50 +334,15 @@ with st.sidebar:
 # ---------------------------------------------------------
 # Core Execution Helper
 # ---------------------------------------------------------
-def run_user_prompt(prompt_text: str):
+def queue_user_prompt(prompt_text: str):
     if not cfg["api_key"]:
         st.error("API key is missing. Add `LLM_API_KEY` in `.env` or click ⚙️ in the sidebar.")
         st.stop()
 
-    _, active_graph = load_active_resources()
     st.session_state.chat_history.append({"role": "user", "content": prompt_text})
-
-    with st.spinner("Thinking..."):
-        config = {"configurable": {"thread_id": st.session_state.thread_id}}
-        result = active_graph.invoke(
-            {
-                "messages": [HumanMessage(content=prompt_text)],
-                "intent": "",
-                "input_safe": True,
-                "guardrail_reason": "",
-                "extracted_url": None,
-                "enriched_data": None,
-                "conflict_memory_id": None,
-                "conflict_reason": "",
-                "hitl_enabled": hitl_enabled,
-                "human_decision": None,
-                "search_query": "",
-                "retrieved_docs": [],
-                "is_relevant": False,
-                "retry_count": 0,
-                "action_log": [],
-                "sources": [],
-            },
-            config=config,
-        )
-
-    if "__interrupt__" in result and result["__interrupt__"]:
-        st.session_state.pending_interrupt = result["__interrupt__"][0].value
-    else:
-        st.session_state.chat_history.append(
-            {
-                "role": "assistant",
-                "content": result["messages"][-1].content,
-                "action_log": result.get("action_log", []),
-                "sources": result.get("sources", []),
-            }
-        )
+    st.session_state.pending_prompt = prompt_text
     st.rerun()
+
 
 
 # ---------------------------------------------------------
@@ -447,6 +415,55 @@ for msg in st.session_state.chat_history:
             with st.expander("⚙️ Agent Trace", expanded=False):
                 for step in msg["action_log"]:
                     st.markdown(f"- {step}")
+
+
+# ---------------------------------------------------------
+# Process Pending Prompt (User message is already visible above)
+# ---------------------------------------------------------
+if st.session_state.pending_prompt:
+    prompt_to_run = st.session_state.pending_prompt
+    st.session_state.pending_prompt = None  # Clear early so errors don't cause retry loops
+
+    _, active_graph = load_active_resources()
+    with st.chat_message("assistant", avatar="🧠"):
+        with st.spinner("Thinking..."):
+            config = {"configurable": {"thread_id": st.session_state.thread_id}}
+            result = active_graph.invoke(
+                {
+                    "messages": [HumanMessage(content=prompt_to_run)],
+                    "intent": "",
+                    "input_safe": True,
+                    "guardrail_reason": "",
+                    "extracted_url": None,
+                    "enriched_data": None,
+                    "conflict_memory_id": None,
+                    "conflict_reason": "",
+                    "hitl_enabled": hitl_enabled,
+                    "human_decision": None,
+                    "search_query": "",
+                    "retrieved_docs": [],
+                    "is_relevant": False,
+                    "retry_count": 0,
+                    "action_log": [],
+                    "sources": [],
+                },
+                config=config,
+            )
+
+    if "__interrupt__" in result and result["__interrupt__"]:
+        st.session_state.pending_interrupt = result["__interrupt__"][0].value
+    else:
+        st.session_state.chat_history.append(
+            {
+                "role": "assistant",
+                "content": result["messages"][-1].content,
+                "action_log": result.get("action_log", []),
+                "sources": result.get("sources", []),
+            }
+        )
+    st.rerun()
+
+
 
 # ---------------------------------------------------------
 # Human-in-the-Loop (HITL) Review Card
@@ -528,8 +545,8 @@ if st.session_state.pending_interrupt and cfg["api_key"]:
 # ---------------------------------------------------------
 prompt = st.chat_input(
     "Save a fact, paste a link, or ask your Second Brain...",
-    disabled=bool(st.session_state.pending_interrupt),
+    disabled=bool(st.session_state.pending_interrupt or st.session_state.pending_prompt),
 )
 
 if prompt:
-    run_user_prompt(prompt)
+    queue_user_prompt(prompt)
